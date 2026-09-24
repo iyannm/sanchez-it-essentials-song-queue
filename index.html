@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Sanchez IT Essentials Class Song Queue</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎵</text></svg>">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🎵 Sanchez IT Essentials Class Song Queue</h1>
+      <p>Search for a song and send it to the class queue. Your teacher will play approved songs on Spotify.</p>
+    </header>
+
+    <div class="card">
+      <label for="name">Your first name (optional)</label>
+      <input id="name" type="text" maxlength="30" autocomplete="given-name" placeholder="e.g. Maria">
+    </div>
+
+    <div class="card">
+      <form id="searchForm">
+        <label for="q">Search for a song</label>
+        <div class="row">
+          <input id="q" type="search" placeholder="Song title or artist" required autocomplete="off">
+          <button type="submit">Search</button>
+        </div>
+      </form>
+      <ul class="rules">
+        <li>Clean songs only. No explicit versions.</li>
+        <li>No songs about drugs, alcohol, violence, or anything inappropriate for school.</li>
+        <li>You can request up to <span id="limitText">3</span> songs every <span id="windowText">30</span> minutes.</li>
+      </ul>
+    </div>
+
+    <div id="status" class="hidden"></div>
+    <div id="results" class="card hidden"></div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="filter.js"></script>
+  <script>
+    const C = window.QUEUE_CONFIG;
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const store = {
+      get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
+      set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
+    };
+
+    $("limitText").textContent = C.maxRequestsPerWindow;
+    $("windowText").textContent = C.windowMinutes;
+    $("name").value = store.get("studentName", "");
+    $("name").addEventListener("input", (e) => store.set("studentName", e.target.value.trim()));
+
+    let lastResults = [];
+
+    function showStatus(kind, html) {
+      const el = $("status");
+      el.className = "notice " + kind;
+      el.innerHTML = html;
+      el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
+    async function fetchWithTimeout(url, opts = {}, ms = 8000) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), ms);
+      try { return await fetch(url, { ...opts, signal: ctrl.signal }); }
+      finally { clearTimeout(t); }
+    }
+
+    $("searchForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const q = $("q").value.trim();
+      if (!q) return;
+      const nameHits = SongFilter.checkMetadata({ title: q });
+      const box = $("results");
+      box.classList.remove("hidden");
+      if (nameHits.length) {
+        box.innerHTML = `<p class="muted">That search isn't school-appropriate. Try another song.</p>`;
+        return;
+      }
+      box.innerHTML = `<p class="muted">Searching…</p>`;
+      try {
+        const url = "https://itunes.apple.com/search?media=music&entity=song&limit=25&country=US&term=" + encodeURIComponent(q);
+        const res = await fetchWithTimeout(url);
+        const data = await res.json();
+        lastResults = (data.results || []).map((r) => {
+          const song = {
+            trackId: r.trackId,
+            title: r.trackName,
+            artist: r.artistName,
+            album: r.collectionName,
+            artwork: (r.artworkUrl100 || "").replace("100x100", "200x200"),
+            explicitness: r.trackExplicitness,
+          };
+          const hits = SongFilter.checkMetadata(song);
+          if (song.explicitness === "explicit") song.blocked = "Explicit version";
+          else if (hits.length) song.blocked = "Not school-safe (" + SongFilter.describe(hits) + ")";
+          return song;
+        });
+        renderResults();
+      } catch (err) {
+        box.innerHTML = `<p class="muted">Search didn't work. Check your connection and try again.</p>`;
+      }
+    });
+
+    function renderResults() {
+      const box = $("results");
+      if (!lastResults.length) {
+        box.innerHTML = `<p class="muted">No songs found. Try different words.</p>`;
+        return;
+      }
+      // Show allowed songs first.
+      const sorted = [...lastResults].sort((a, b) => !!a.blocked - !!b.blocked);
+      box.innerHTML = sorted.map((s) => `
+        <div class="song">
+          <img src="${esc(s.artwork)}" alt="" loading="lazy">
+          <div class="info">
+            <div class="title">${esc(s.title)}</div>
+            <div class="meta">${esc(s.artist)} · ${esc(s.album)}</div>
+            ${s.blocked ? `<span class="tag bad">🚫 ${esc(s.blocked)}</span>`
+              : s.explicitness === "cleaned" ? `<span class="tag good">Clean version</span>` : ""}
+          </div>
+          <div class="actions">
+            ${s.blocked ? "" : `<button data-id="${s.trackId}">Request</button>`}
+          </div>
+        </div>`).join("");
+      box.querySelectorAll("button[data-id]").forEach((b) =>
+        b.addEventListener("click", () => requestSong(Number(b.dataset.id), b)));
+    }
+
+    function recentRequests() {
+      const cutoff = Date.now() - C.windowMinutes * 60000;
+      return store.get("myRequests", []).filter((r) => r.at > cutoff);
+    }
+
+    async function checkLyrics(song) {
+      // Best effort: some school networks block lyric sites, so a failed lookup doesn't block the request.
+      try {
+        const url = "https://lrclib.net/api/search?track_name=" + encodeURIComponent(song.title) +
+          "&artist_name=" + encodeURIComponent(song.artist);
+        const res = await fetchWithTimeout(url, {}, 7000);
+        if (!res.ok) return { checked: false };
+        const list = await res.json();
+        const match = (list || []).find((x) => x.plainLyrics);
+        if (!match) return { checked: false };
+        return { checked: true, hits: SongFilter.checkLyrics(match.plainLyrics) };
+      } catch {
+        return { checked: false };
+      }
+    }
+
+    async function requestSong(trackId, btn) {
+      const song = lastResults.find((s) => s.trackId === trackId);
+      if (!song || song.blocked) return;
+
+      const recent = recentRequests();
+      if (recent.length >= C.maxRequestsPerWindow) {
+        const wait = Math.ceil((recent[0].at + C.windowMinutes * 60000 - Date.now()) / 60000);
+        showStatus("bad", `You've hit the limit of ${C.maxRequestsPerWindow} songs. Try again in about ${wait} min.`);
+        return;
+      }
+      if (recent.some((r) => r.trackId === trackId)) {
+        showStatus("bad", `You already requested <b>${esc(song.title)}</b>.`);
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = "Checking lyrics…";
+      const lyr = await checkLyrics(song);
+      if (lyr.checked && lyr.hits.length) {
+        song.blocked = "Lyrics not school-safe (" + SongFilter.describe(lyr.hits) + ")";
+        renderResults();
+        showStatus("bad", `<b>${esc(song.title)}</b> can't be requested: its lyrics mention ${esc(SongFilter.describe(lyr.hits))}. Pick a different song.`);
+        return;
+      }
+
+      btn.textContent = "Sending…";
+      const payload = {
+        v: 1,
+        trackId: song.trackId,
+        title: song.title,
+        artist: song.artist,
+        album: song.album,
+        artwork: song.artwork,
+        explicitness: song.explicitness,
+        lyricsChecked: lyr.checked,
+        name: ($("name").value || "").trim().slice(0, 30),
+      };
+      if (payload.name && SongFilter.checkMetadata({ title: payload.name }).length) payload.name = "";
+      try {
+        const res = await fetchWithTimeout(`${C.relay}/${C.topic}`, { method: "POST", body: JSON.stringify(payload) });
+        if (!res.ok) throw new Error(res.status);
+        store.set("myRequests", [...recent, { trackId, at: Date.now() }]);
+        btn.textContent = "Sent ✓";
+        showStatus("good", `✅ <b>${esc(song.title)}</b> by ${esc(song.artist)} was sent to the queue!`);
+      } catch {
+        btn.disabled = false;
+        btn.textContent = "Request";
+        showStatus("bad", "Couldn't send your request. Wait a few seconds and try again.");
+      }
+    }
+  </script>
+</body>
+</html>

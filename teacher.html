@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Song Queue Teacher View</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎧</text></svg>">
+  <link rel="stylesheet" href="style.css">
+  <style>
+    .wrap { max-width: 900px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 16px; }
+    .tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+    .tabs button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+    .spacer { flex: 1; }
+    .count { font-weight: 700; color: var(--accent); }
+    #qrOverlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.85); display: flex;
+      align-items: center; justify-content: center; padding: 16px; z-index: 10;
+    }
+    #qrOverlay .panel { background: #fff; color: #111; border-radius: 16px; padding: 24px; text-align: center; max-width: 560px; width: 100%; }
+    #qrOverlay h2 { margin: 0 0 12px; font-size: 1.4rem; }
+    #qrCode svg { width: 100%; max-width: 420px; height: auto; }
+    #qrLink { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; margin: 12px 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🎧 Song Queue: Teacher View</h1>
+      <p>Requests from <a id="studentLink" href="./">the student page</a> show up here automatically.
+        Click <b>Open in Spotify</b>, then right-click the song and choose <b>Add to queue</b>.</p>
+    </header>
+
+    <div class="toolbar">
+      <div class="tabs" id="tabs">
+        <button class="secondary" data-tab="new" aria-pressed="true">New <span id="c-new"></span></button>
+        <button class="secondary" data-tab="queued">Queued <span id="c-queued"></span></button>
+        <button class="secondary" data-tab="rejected">Rejected <span id="c-rejected"></span></button>
+      </div>
+      <div class="spacer"></div>
+      <button class="secondary" id="clearBtn">Clear this list</button>
+      <button id="qrBtn">Show QR code</button>
+    </div>
+
+    <div id="error" class="notice bad hidden"></div>
+    <div id="list" class="card"><p class="muted">Loading requests…</p></div>
+    <p class="muted" id="updated"></p>
+  </div>
+
+  <div id="qrOverlay" class="hidden">
+    <div class="panel">
+      <h2>Sanchez IT Essentials Class Song Queue</h2>
+      <div id="qrCode"></div>
+      <div id="qrLink"></div>
+      <button id="qrClose">Close</button>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js"></script>
+  <script src="config.js"></script>
+  <script>
+    const C = window.QUEUE_CONFIG;
+    const $ = (id) => document.getElementById(id);
+    const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+    const KEY = "songQueue:" + C.topic;
+    const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || { songs: {}, seen: [] }; } catch { return { songs: {}, seen: [] }; } };
+    const save = () => { try { localStorage.setItem(KEY, JSON.stringify(state)); } catch {} };
+
+    let state = load();
+    let tab = "new";
+    const studentUrl = new URL("./", location.href).href;
+    $("studentLink").href = studentUrl;
+
+    // Pull every message the relay still has (~12h) and merge in the ones we haven't seen.
+    async function refresh() {
+      try {
+        const res = await fetch(`${C.relay}/${C.topic}/json?poll=1&since=all`);
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const text = await res.text();
+        const seen = new Set(state.seen);
+        for (const line of text.split("\n")) {
+          if (!line.trim()) continue;
+          let msg, req;
+          try { msg = JSON.parse(line); req = JSON.parse(msg.message); } catch { continue; }
+          if (msg.event !== "message" || seen.has(msg.id) || !req.trackId) continue;
+          seen.add(msg.id);
+          const key = String(req.trackId);
+          const s = state.songs[key] || (state.songs[key] = {
+            ...req, status: "new", count: 0, names: [], firstAt: msg.time * 1000,
+          });
+          s.count++;
+          s.lastAt = msg.time * 1000;
+          if (req.lyricsChecked) s.lyricsChecked = true;
+          if (req.name && !s.names.includes(req.name)) s.names.push(req.name);
+          // A song that was already played comes back as a new request.
+          if (s.status === "queued" && s.lastAt > (s.statusAt || 0)) { s.status = "new"; s.count = 1; }
+        }
+        state.seen = [...seen].slice(-2000);
+        save();
+        $("error").classList.add("hidden");
+        $("updated").textContent = "Last checked " + new Date().toLocaleTimeString() + ". Updates every 15 seconds.";
+      } catch (err) {
+        const e = $("error");
+        e.classList.remove("hidden");
+        e.textContent = "Couldn't reach the request relay (ntfy.sh). Showing saved requests. Retrying…";
+      }
+      render();
+    }
+
+    function spotifyUrl(s) {
+      return "https://open.spotify.com/search/" + encodeURIComponent(`${s.title} ${s.artist}`.replace(/\s*[\(\[].*?[\)\]]/g, ""));
+    }
+
+    function render() {
+      const all = Object.values(state.songs);
+      for (const t of ["new", "queued", "rejected"]) {
+        const n = all.filter((s) => s.status === t).length;
+        $("c-" + t).textContent = n ? `(${n})` : "";
+      }
+      const list = all.filter((s) => s.status === tab)
+        .sort((a, b) => tab === "new" ? (b.count - a.count) || (a.firstAt - b.firstAt) : (b.statusAt || 0) - (a.statusAt || 0));
+      const box = $("list");
+      if (!list.length) {
+        box.innerHTML = `<p class="muted">${tab === "new" ? "No new requests yet. Show the QR code so students can join." : "Nothing here."}</p>`;
+        return;
+      }
+      box.innerHTML = list.map((s) => `
+        <div class="song">
+          <img src="${esc(s.artwork)}" alt="" loading="lazy">
+          <div class="info">
+            <div class="title">${esc(s.title)} ${s.count > 1 ? `<span class="count">×${s.count}</span>` : ""}</div>
+            <div class="meta">${esc(s.artist)} · ${esc(s.album)}</div>
+            <div class="meta">${s.names.length ? "Requested by " + esc(s.names.join(", ")) : "Anonymous"} · ${new Date(s.firstAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}</div>
+            ${s.explicitness === "cleaned" ? `<span class="tag good">Clean version: pick the clean one in Spotify</span> ` : ""}
+            ${s.lyricsChecked ? `<span class="tag good">Lyrics checked</span>` : `<span class="tag warn">Lyrics not checked: review first</span>`}
+          </div>
+          <div class="actions">
+            <a class="btn" href="${spotifyUrl(s)}" target="_blank" rel="noopener">Open in Spotify</a>
+            ${tab !== "queued" ? `<button class="secondary" data-act="queued" data-id="${s.trackId}">✓ Queued</button>` : ""}
+            ${tab !== "rejected" ? `<button class="secondary" data-act="rejected" data-id="${s.trackId}">✕ Reject</button>` : ""}
+            ${tab !== "new" ? `<button class="secondary" data-act="new" data-id="${s.trackId}">↺ Back to new</button>` : ""}
+          </div>
+        </div>`).join("");
+    }
+
+    $("list").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-act]");
+      if (!b) return;
+      const s = state.songs[b.dataset.id];
+      s.status = b.dataset.act;
+      s.statusAt = Date.now();
+      save();
+      render();
+    });
+
+    $("tabs").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-tab]");
+      if (!b) return;
+      tab = b.dataset.tab;
+      document.querySelectorAll("#tabs button").forEach((x) => x.setAttribute("aria-pressed", x === b));
+      render();
+    });
+
+    $("clearBtn").addEventListener("click", () => {
+      const btn = $("clearBtn");
+      if (btn.dataset.armed !== "1") {
+        btn.dataset.armed = "1";
+        btn.textContent = "Click again to clear";
+        setTimeout(() => { btn.dataset.armed = ""; btn.textContent = "Clear this list"; }, 3000);
+        return;
+      }
+      for (const [k, s] of Object.entries(state.songs)) if (s.status === tab) delete state.songs[k];
+      btn.dataset.armed = "";
+      btn.textContent = "Clear this list";
+      save();
+      render();
+    });
+
+    function showQr() {
+      $("qrLink").textContent = studentUrl;
+      try {
+        const qr = qrcode(0, "M");
+        qr.addData(studentUrl);
+        qr.make();
+        $("qrCode").innerHTML = qr.createSvgTag({ cellSize: 8, margin: 2, scalable: true });
+      } catch {
+        $("qrCode").innerHTML = "<p>QR code couldn't load. Use the link below.</p>";
+      }
+      $("qrOverlay").classList.remove("hidden");
+    }
+    $("qrBtn").addEventListener("click", showQr);
+    $("qrClose").addEventListener("click", () => $("qrOverlay").classList.add("hidden"));
+    $("qrOverlay").addEventListener("click", (e) => { if (e.target.id === "qrOverlay") $("qrOverlay").classList.add("hidden"); });
+
+    render();
+    refresh();
+    setInterval(refresh, 15000);
+  </script>
+</body>
+</html>
