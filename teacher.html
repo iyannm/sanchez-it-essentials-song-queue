@@ -22,10 +22,27 @@
     #qrOverlay h2 { margin: 0 0 12px; font-size: 1.4rem; }
     #qrCode svg { width: 100%; max-width: 420px; height: auto; }
     #qrLink { font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; margin: 12px 0; }
+    #lock { max-width: 420px; margin: 12vh auto 0; }
+    #lock .check { display: flex; gap: 8px; align-items: center; font-weight: 400; margin: 12px 0; }
+    #lock input[type="password"] {
+      width: 100%; font: inherit; padding: 10px 12px; border: 1px solid var(--line);
+      border-radius: 8px; background: var(--bg); color: var(--text);
+    }
   </style>
 </head>
 <body>
-  <div class="wrap">
+  <div class="wrap" id="lock">
+    <form class="card" id="lockForm">
+      <h1 style="font-size:1.3rem;margin-top:0">🔒 Teacher View</h1>
+      <label for="pw">Password</label>
+      <input id="pw" type="password" autocomplete="current-password" required autofocus>
+      <label class="check"><input type="checkbox" id="remember"> Remember on this computer</label>
+      <div id="pwError" class="notice bad hidden">Wrong password.</div>
+      <button type="submit" id="pwBtn">Unlock</button>
+    </form>
+  </div>
+
+  <div class="wrap hidden" id="app">
     <header>
       <h1>🎧 Song Queue: Teacher View</h1>
       <p>Requests from <a id="studentLink" href="./">the student page</a> show up here automatically.
@@ -41,6 +58,7 @@
       <div class="spacer"></div>
       <button class="secondary" id="clearBtn">Clear this list</button>
       <button id="qrBtn">Show QR code</button>
+      <button class="secondary" id="lockBtn">🔒 Lock</button>
     </div>
 
     <div id="error" class="notice bad hidden"></div>
@@ -193,9 +211,53 @@
     $("qrClose").addEventListener("click", () => $("qrOverlay").classList.add("hidden"));
     $("qrOverlay").addEventListener("click", (e) => { if (e.target.id === "qrOverlay") $("qrOverlay").classList.add("hidden"); });
 
-    render();
-    refresh();
-    setInterval(refresh, 15000);
+    // Password gate. Only a salted PBKDF2 hash is stored here, never the password itself.
+    const PW_SALT = "65b973753638a1411ae6bddbb28dc586";
+    const PW_HASH = "c8945c1b8bc57c80dd194b2379f7b48691322f5e93cee90a34e3410e5a956581";
+    const UNLOCK_KEY = "teacherUnlocked:" + PW_HASH;
+
+    async function hashPassword(pw) {
+      const enc = new TextEncoder();
+      const salt = new Uint8Array(PW_SALT.match(/../g).map((h) => parseInt(h, 16)));
+      const key = await crypto.subtle.importKey("raw", enc.encode(pw), "PBKDF2", false, ["deriveBits"]);
+      const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt, iterations: 300000, hash: "SHA-256" }, key, 256);
+      return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    function unlock() {
+      $("lock").classList.add("hidden");
+      $("app").classList.remove("hidden");
+      render();
+      refresh();
+      setInterval(refresh, 15000);
+    }
+
+    const remembered = (() => {
+      try { return localStorage.getItem(UNLOCK_KEY) === "1" || sessionStorage.getItem(UNLOCK_KEY) === "1"; } catch { return false; }
+    })();
+    if (remembered) unlock();
+
+    $("lockBtn").addEventListener("click", () => {
+      try { localStorage.removeItem(UNLOCK_KEY); sessionStorage.removeItem(UNLOCK_KEY); } catch {}
+      location.reload();
+    });
+
+    $("lockForm").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      $("pwBtn").disabled = true;
+      $("pwError").classList.add("hidden");
+      const ok = (await hashPassword($("pw").value)) === PW_HASH;
+      $("pwBtn").disabled = false;
+      if (!ok) {
+        $("pwError").classList.remove("hidden");
+        $("pw").select();
+        return;
+      }
+      try {
+        (($("remember").checked) ? localStorage : sessionStorage).setItem(UNLOCK_KEY, "1");
+      } catch {}
+      unlock();
+    });
   </script>
 </body>
 </html>
