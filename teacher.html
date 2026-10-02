@@ -361,8 +361,8 @@
     $("qrOverlay").addEventListener("click", (e) => { if (e.target.id === "qrOverlay") $("qrOverlay").classList.add("hidden"); });
 
     // Password gate. Only a salted PBKDF2 hash is stored here, never the password itself.
-    const PW_SALT = "65b973753638a1411ae6bddbb28dc586";
-    const PW_HASH = "c8945c1b8bc57c80dd194b2379f7b48691322f5e93cee90a34e3410e5a956581";
+    const PW_SALT = "25bfdbbf7bbf49a98631473b6e120737";
+    const PW_HASH = "f63b8c5782e6f3a446faad973e0ca3c69faf3194b716a840a5bb05cfd60f3d78";
     const UNLOCK_KEY = "teacherUnlocked:" + PW_HASH;
 
     async function hashPassword(pw) {
