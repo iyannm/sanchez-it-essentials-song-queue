@@ -8,4 +8,7 @@ window.QUEUE_CONFIG = {
   // How many songs one device can request per window.
   maxRequestsPerWindow: 3,
   windowMinutes: 30,
+  // Client ID of the Spotify app made at developer.spotify.com (see README). Leave empty to
+  // turn off one-click queueing; the teacher page then only shows "Open in Spotify".
+  spotifyClientId: "38b1303d4c054778801072fe5bc40305",
 };

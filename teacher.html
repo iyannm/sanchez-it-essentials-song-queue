@@ -46,7 +46,7 @@
     <header>
       <h1>🎧 Song Queue: Teacher View</h1>
       <p>Requests from <a id="studentLink" href="./">the student page</a> show up here automatically.
-        Click <b>Open in Spotify</b>, then right-click the song and choose <b>Add to queue</b>.</p>
+        <span id="howTo">Click <b>Open in Spotify</b>, then right-click the song and choose <b>Add to queue</b>.</span></p>
     </header>
 
     <div class="toolbar">
@@ -57,11 +57,13 @@
       </div>
       <div class="spacer"></div>
       <button class="secondary" id="clearBtn">Clear this list</button>
+      <button class="secondary hidden" id="spotifyBtn">Connect Spotify</button>
       <button id="qrBtn">Show QR code</button>
       <button class="secondary" id="lockBtn">🔒 Lock</button>
     </div>
 
     <div id="error" class="notice bad hidden"></div>
+    <div id="spotifyMsg" class="notice hidden"></div>
     <div id="list" class="card"><p class="muted">Loading requests…</p></div>
     <p class="muted" id="updated"></p>
   </div>
@@ -154,8 +156,9 @@
             ${s.lyricsChecked ? `<span class="tag good">Lyrics checked</span>` : `<span class="tag warn">Lyrics not checked: review first</span>`}
           </div>
           <div class="actions">
-            <a class="btn" href="${spotifyUrl(s)}" target="_blank" rel="noopener">Open in Spotify</a>
-            ${tab !== "queued" ? `<button class="secondary" data-act="queued" data-id="${s.trackId}">✓ Queued</button>` : ""}
+            ${spotifyOn() && tab !== "queued" ? `<button data-act="spotify" data-id="${s.trackId}">▶ Queue</button>` : ""}
+            <a class="btn${spotifyOn() ? " secondary" : ""}" href="${spotifyUrl(s)}" target="_blank" rel="noopener">Open in Spotify</a>
+            ${tab !== "queued" ? `<button class="secondary" data-act="queued" data-id="${s.trackId}">✓ ${spotifyOn() ? "Mark queued" : "Queued"}</button>` : ""}
             ${tab !== "rejected" ? `<button class="secondary" data-act="rejected" data-id="${s.trackId}">✕ Reject</button>` : ""}
             ${tab !== "new" ? `<button class="secondary" data-act="new" data-id="${s.trackId}">↺ Back to new</button>` : ""}
           </div>
@@ -166,11 +169,157 @@
       const b = e.target.closest("button[data-act]");
       if (!b) return;
       const s = state.songs[b.dataset.id];
+      if (b.dataset.act === "spotify") { queueOnSpotify(s, b); return; }
       s.status = b.dataset.act;
       s.statusAt = Date.now();
       save();
       render();
     });
+
+    // One-click queueing through the Spotify Web API. Uses the PKCE login flow, so only the
+    // public Client ID lives in this page; tokens stay in this browser's storage.
+    const SP_KEY = "spotifyAuth:" + C.spotifyClientId;
+    const SP_SCOPES = "user-modify-playback-state user-read-playback-state";
+    const spRedirect = location.origin + location.pathname;
+    const spLoad = () => { try { return JSON.parse(localStorage.getItem(SP_KEY)); } catch { return null; } };
+    let spAuth = spLoad();
+    const spotifyOn = () => !!(C.spotifyClientId && spAuth);
+
+    function spSave(auth) {
+      spAuth = auth;
+      try { auth ? localStorage.setItem(SP_KEY, JSON.stringify(auth)) : localStorage.removeItem(SP_KEY); } catch {}
+      spUpdateUi();
+      render();
+    }
+
+    function spMsg(text, good) {
+      const m = $("spotifyMsg");
+      m.className = "notice " + (good ? "good" : "bad");
+      m.textContent = text;
+      clearTimeout(spMsg.t);
+      spMsg.t = setTimeout(() => m.classList.add("hidden"), good ? 5000 : 15000);
+    }
+
+    function spUpdateUi() {
+      const b = $("spotifyBtn");
+      b.classList.toggle("hidden", !C.spotifyClientId);
+      b.textContent = spAuth ? "Disconnect Spotify" : "Connect Spotify";
+      $("howTo").innerHTML = spAuth
+        ? "Click <b>▶ Queue</b> to add a song to the end of your Spotify queue. Spotify must be open and playing on some device."
+        : "Click <b>Open in Spotify</b>, then right-click the song and choose <b>Add to queue</b>.";
+    }
+
+    const b64url = (bytes) => btoa(String.fromCharCode(...new Uint8Array(bytes))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+    async function spConnect() {
+      const verifier = b64url(crypto.getRandomValues(new Uint8Array(48)));
+      const stateTok = b64url(crypto.getRandomValues(new Uint8Array(16)));
+      const challenge = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier)));
+      try { sessionStorage.setItem("spotifyPkce", JSON.stringify({ verifier, state: stateTok })); } catch {}
+      location.href = "https://accounts.spotify.com/authorize?" + new URLSearchParams({
+        response_type: "code", client_id: C.spotifyClientId, scope: SP_SCOPES,
+        redirect_uri: spRedirect, code_challenge_method: "S256", code_challenge: challenge, state: stateTok,
+      });
+    }
+
+    async function spToken(params) {
+      const res = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ client_id: C.spotifyClientId, ...params }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error_description || data.error || "HTTP " + res.status);
+      return {
+        access: data.access_token,
+        refresh: data.refresh_token || spAuth?.refresh,
+        expiresAt: Date.now() + (data.expires_in - 60) * 1000,
+      };
+    }
+
+    // Finish the login when Spotify sends us back here with ?code=...
+    async function spHandleRedirect() {
+      const p = new URLSearchParams(location.search);
+      if (!p.has("code") && !p.has("error")) return;
+      history.replaceState(null, "", spRedirect);
+      let pkce = null;
+      try { pkce = JSON.parse(sessionStorage.getItem("spotifyPkce")); sessionStorage.removeItem("spotifyPkce"); } catch {}
+      if (p.has("error") || !pkce || p.get("state") !== pkce.state) {
+        spMsg("Spotify connection was cancelled or didn't match. Try Connect Spotify again.");
+        return;
+      }
+      try {
+        spSave(await spToken({ grant_type: "authorization_code", code: p.get("code"), redirect_uri: spRedirect, code_verifier: pkce.verifier }));
+        spMsg("Spotify connected. Use ▶ Queue to add songs.", true);
+      } catch (err) {
+        spMsg("Couldn't connect Spotify: " + err.message);
+      }
+    }
+
+    async function spFetch(path, opts = {}, retried = false) {
+      if (!spAuth) throw new Error("Spotify isn't connected.");
+      if (Date.now() > spAuth.expiresAt) {
+        try { spSave(await spToken({ grant_type: "refresh_token", refresh_token: spAuth.refresh })); }
+        catch { spSave(null); throw new Error("Spotify login expired. Click Connect Spotify again."); }
+      }
+      const res = await fetch("https://api.spotify.com/v1" + path, {
+        ...opts, headers: { Authorization: "Bearer " + spAuth.access, ...opts.headers },
+      });
+      if (res.status === 401 && !retried) { spAuth.expiresAt = 0; return spFetch(path, opts, true); }
+      return res;
+    }
+
+    const plain = (t) => String(t || "").toLowerCase().replace(/\s*[\(\[].*?[\)\]]/g, "").replace(/\s+-\s+.*$/, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+    // Find the Spotify track for a request. Never picks a version Spotify marks explicit.
+    async function spFindTrack(s) {
+      const title = plain(s.title), artist = plain(s.artist);
+      let items = [];
+      for (const q of [`track:${title} artist:${artist}`, `${title} ${artist}`]) {
+        const res = await spFetch("/search?" + new URLSearchParams({ q, type: "track", limit: "10" }));
+        if (!res.ok) throw new Error("Spotify search failed (HTTP " + res.status + ").");
+        items = (await res.json()).tracks?.items || [];
+        if (items.length) break;
+      }
+      if (!items.length) return { error: "Couldn't find this song on Spotify. Use Open in Spotify." };
+      const score = (t) => (plain(t.name) === title ? 2 : 0) + (t.artists.some((a) => artist.includes(plain(a.name))) ? 1 : 0);
+      const clean = items.filter((t) => !t.explicit).sort((a, b) => score(b) - score(a));
+      if (!clean.length || score(clean[0]) === 0) {
+        return { error: "Spotify only has an explicit version of this song, so it wasn't queued." };
+      }
+      return { track: clean[0] };
+    }
+
+    async function queueOnSpotify(s, btn) {
+      btn.disabled = true;
+      btn.textContent = "Queueing…";
+      try {
+        const found = await spFindTrack(s);
+        if (found.error) { spMsg(found.error); return; }
+        const t = found.track;
+        const res = await spFetch("/me/player/queue?uri=" + encodeURIComponent(t.uri), { method: "POST" });
+        if (res.status === 404) { spMsg("Spotify isn't playing anywhere. Open Spotify on this computer, start any song, then try again."); return; }
+        if (res.status === 403) { spMsg("Spotify refused: queueing needs Spotify Premium, and your account must be added to the app's User Management list."); return; }
+        if (res.status === 429) { spMsg("Spotify says too many requests. Wait a minute and try again."); return; }
+        if (!res.ok) { spMsg("Spotify couldn't queue it (HTTP " + res.status + ")."); return; }
+        s.status = "queued";
+        s.statusAt = Date.now();
+        s.spotifyName = `${t.name} · ${t.artists.map((a) => a.name).join(", ")}`;
+        save();
+        spMsg("Added to Spotify queue: " + s.spotifyName, true);
+      } catch (err) {
+        spMsg(err.message || "Couldn't reach Spotify.");
+      } finally {
+        render();
+      }
+    }
+
+    $("spotifyBtn").addEventListener("click", () => {
+      if (spAuth) { spSave(null); spMsg("Spotify disconnected.", true); }
+      else spConnect();
+    });
+    spUpdateUi();
+    spHandleRedirect();
 
     $("tabs").addEventListener("click", (e) => {
       const b = e.target.closest("button[data-tab]");
