@@ -15,8 +15,8 @@
     </header>
 
     <div class="card">
-      <label for="name">Your first name (optional)</label>
-      <input id="name" type="text" maxlength="30" autocomplete="given-name" placeholder="e.g. Maria">
+      <label for="name">Your first name</label>
+      <input id="name" type="text" maxlength="30" required autocomplete="given-name" placeholder="e.g. Maria">
     </div>
 
     <div class="card">
@@ -155,6 +155,12 @@
     async function requestSong(trackId, btn) {
       const song = lastResults.find((s) => s.trackId === trackId);
       if (!song || song.blocked) return;
+
+      if (!$("name").value.trim()) {
+        showStatus("bad", "Enter your first name before requesting a song.");
+        $("name").focus();
+        return;
+      }
 
       const recent = recentRequests();
       if (recent.length >= C.maxRequestsPerWindow) {
